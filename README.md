@@ -1,2 +1,0 @@
-# Malakas at Maliksi
-
