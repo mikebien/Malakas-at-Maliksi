@@ -1,14 +1,21 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.Users;
 
 [RequireComponent(typeof(Rigidbody2D))]
 [RequireComponent(typeof(Animator))]
-public class PlayerMovement2D : MonoBehaviour
+[RequireComponent(typeof(PlayerInput))]
+public class MalakasPlayerMovement : MonoBehaviour
 {
     [Header("Movement Settings")]
     [SerializeField] private float moveSpeed = 5f;
     [SerializeField] private float pushSpeedMultiplier = 0.5f;
     [SerializeField] private float jumpForce = 12f;
+
+    [Header("Combat / Punch Settings")]
+    [SerializeField] private Vector2 punchOffset = new Vector2(0.8f, 0f);
+    [SerializeField] private Vector2 punchSize = new Vector2(0.8f, 0.8f);
+    [SerializeField] private LayerMask destroyableLayer;
 
     [Header("Ground Check Settings")]
     [SerializeField] private Transform groundCheck;
@@ -22,10 +29,9 @@ public class PlayerMovement2D : MonoBehaviour
     private bool facingRight = true;
     private bool isHoldingObject = false;
 
-    private Transform nearbyPushable;
-    private Transform nearbyDestroyable;
     private Transform grabbedObject;
     private Rigidbody2D grabbedBoxRb;
+    private Transform nearbyPushable;
 
     private void Awake()
     {
@@ -57,7 +63,6 @@ public class PlayerMovement2D : MonoBehaviour
         float currentSpeedMultiplier = isHoldingObject ? pushSpeedMultiplier : 1f;
         rb.linearVelocity = new Vector2(moveInput.x * moveSpeed * currentSpeedMultiplier, rb.linearVelocity.y);
 
-        // Smoothly sync box position when holding it
         if (isHoldingObject && grabbedBoxRb != null)
         {
             float offset = 1.1f;
@@ -81,9 +86,6 @@ public class PlayerMovement2D : MonoBehaviour
 
     public void OnInteract(InputValue value)
     {
-        // With a pure Tap interaction, the event fires on release. 
-        // Simply toggle the grab state directly when this method is called:
-    
         if (!isHoldingObject)
         {
             if (nearbyPushable != null)
@@ -123,15 +125,19 @@ public class PlayerMovement2D : MonoBehaviour
 
     public void OnPunch(InputValue value)
     {
-        if (value.isPressed && !isHoldingObject)
-        {
-            animator.SetTrigger("Punch");
+        if (!value.isPressed || isHoldingObject) return;
 
-            if (nearbyDestroyable != null)
-            {
-                Destroy(nearbyDestroyable.gameObject);
-                nearbyDestroyable = null;
-            }
+        animator.SetTrigger("Punch");
+
+        // Calculate punch box position based on facing direction
+        Vector2 directionOffset = new Vector2(facingRight ? punchOffset.x : -punchOffset.x, punchOffset.y);
+        Vector2 punchPos = (Vector2)transform.position + directionOffset;
+
+        // Detect and destroy any destroyable objects in the hitbox
+        Collider2D[] hitObjects = Physics2D.OverlapBoxAll(punchPos, punchSize, 0f, destroyableLayer);
+        foreach (Collider2D hit in hitObjects)
+        {
+            Destroy(hit.transform.root.gameObject);
         }
     }
 
@@ -141,19 +147,12 @@ public class PlayerMovement2D : MonoBehaviour
         {
             nearbyPushable = other.transform.root;
         }
-
-        if (other.CompareTag("DestroyableWall"))
-        {
-            nearbyDestroyable = other.transform.root;
-        }
     }
 
     private void OnTriggerExit2D(Collider2D other)
     {
         Transform rootTransform = other.transform.root;
-
         if (rootTransform == nearbyPushable) nearbyPushable = null;
-        if (rootTransform == nearbyDestroyable) nearbyDestroyable = null;
     }
 
     private void Flip()
@@ -171,5 +170,10 @@ public class PlayerMovement2D : MonoBehaviour
             Gizmos.color = Color.green;
             Gizmos.DrawWireSphere(groundCheck.position, groundCheckRadius);
         }
+
+        // Visualize the punch hitbox in the Scene view when Malakas is selected
+        Gizmos.color = Color.red;
+        Vector2 drawOffset = new Vector2(facingRight ? punchOffset.x : -punchOffset.x, punchOffset.y);
+        Gizmos.DrawWireCube((Vector2)transform.position + drawOffset, punchSize);
     }
 }
