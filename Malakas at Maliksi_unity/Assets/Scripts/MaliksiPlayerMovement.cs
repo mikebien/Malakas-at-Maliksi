@@ -1,4 +1,5 @@
 using System.Collections;
+using Unity.Netcode;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
@@ -6,7 +7,7 @@ using UnityEngine.InputSystem;
 [RequireComponent(typeof(CapsuleCollider2D))]
 [RequireComponent(typeof(Animator))]
 [RequireComponent(typeof(PlayerInput))]
-public class MaliksiPlayerMovement : MonoBehaviour
+public class MaliksiPlayerMovement : NetworkBehaviour
 {
     [Header("Movement Settings")]
     [SerializeField] private float moveSpeed = 6f;
@@ -33,8 +34,14 @@ public class MaliksiPlayerMovement : MonoBehaviour
     private Animator animator;
     private Vector2 moveInput;
     private bool isGrounded;
-    private bool facingRight = true;
     private int jumpsRemaining;
+
+    // Networked Facing Direction variable
+    private NetworkVariable<bool> isFacingRight = new NetworkVariable<bool>(
+        true, 
+        NetworkVariableReadPermission.Everyone, 
+        NetworkVariableWritePermission.Owner
+    );
 
     private void Awake()
     {
@@ -47,8 +54,34 @@ public class MaliksiPlayerMovement : MonoBehaviour
         jumpsRemaining = maxJumps;
     }
 
+    public override void OnNetworkSpawn()
+    {
+        base.OnNetworkSpawn();
+        
+        PlayerInput playerInput = GetComponent<PlayerInput>();
+        if (playerInput != null)
+        {
+            playerInput.enabled = IsOwner;
+            if (IsOwner)
+            {
+                playerInput.ActivateInput();
+            }
+        }
+
+        isFacingRight.OnValueChanged += OnFacingDirectionChanged;
+        ApplyVisualFlip(isFacingRight.Value);
+    }
+
+    public override void OnNetworkDespawn()
+    {
+        base.OnNetworkDespawn();
+        isFacingRight.OnValueChanged -= OnFacingDirectionChanged;
+    }
+
     private void Update()
     {
+        if (!IsOwner) return;
+
         if (groundCheck != null)
         {
             bool wasGrounded = isGrounded;
@@ -67,8 +100,8 @@ public class MaliksiPlayerMovement : MonoBehaviour
 
         if (!isDashing && moveInput.x != 0)
         {
-            if (moveInput.x > 0 && !facingRight) Flip();
-            else if (moveInput.x < 0 && facingRight) Flip();
+            if (moveInput.x > 0 && !isFacingRight.Value) Flip(true);
+            else if (moveInput.x < 0 && isFacingRight.Value) Flip(false);
         }
 
         animator.SetFloat("Speed", Mathf.Abs(rb.linearVelocity.x));
@@ -77,20 +110,22 @@ public class MaliksiPlayerMovement : MonoBehaviour
 
     private void FixedUpdate()
     {
+        if (!IsOwner) return;
         if (isDashing) return;
 
         rb.linearVelocity = new Vector2(moveInput.x * moveSpeed, rb.linearVelocity.y);
     }
 
-    // Matches the 'MoveMaliksi' Action Name in your Input Actions Editor
-    public void OnMoveMaliksi(InputValue value)
+    public void OnMove(InputValue value)
     {
+        if (!IsOwner) return;
         if (isDashing) return;
         moveInput = value.Get<Vector2>();
     }
 
     public void OnJumpMaliksi(InputValue value)
     {
+        if (!IsOwner) return;
         if (!value.isPressed || isDashing) return;
 
         if (isGrounded || jumpsRemaining > 0)
@@ -102,6 +137,7 @@ public class MaliksiPlayerMovement : MonoBehaviour
 
     public void OnDash(InputValue value)
     {
+        if (!IsOwner) return;
         if (!value.isPressed || isDashing || dashCooldownTimer > 0) return;
 
         StartCoroutine(PerformLowDash());
@@ -120,7 +156,7 @@ public class MaliksiPlayerMovement : MonoBehaviour
         float originalGravity = rb.gravityScale;
         rb.gravityScale = 0f;
 
-        float dashDir = facingRight ? 1f : -1f;
+        float dashDir = isFacingRight.Value ? 1f : -1f;
         float elapsed = 0f;
 
         while (elapsed < dashDuration)
@@ -130,7 +166,6 @@ public class MaliksiPlayerMovement : MonoBehaviour
             yield return null;
         }
 
-        // Apply brief full stop
         rb.linearVelocity = new Vector2(0f, 0f);
 
         if (dashEndPause > 0f)
@@ -138,28 +173,38 @@ public class MaliksiPlayerMovement : MonoBehaviour
             yield return new WaitForSeconds(dashEndPause);
         }
 
-        // Restore physics and collider dimensions
         rb.gravityScale = originalGravity;
         capsuleCollider.size = new Vector2(capsuleCollider.size.x, originalColliderHeight);
         capsuleCollider.offset = originalColliderOffset;
         
         isDashing = false;
 
-        // Directly check if the Left or Right Arrow keys are still held down at the end of the dash
         if (Keyboard.current != null)
         {
             float horizontalInput = 0f;
-            if (Keyboard.current.leftArrowKey.isPressed) horizontalInput -= 1f;
-            if (Keyboard.current.rightArrowKey.isPressed) horizontalInput += 1f;
+            if (Keyboard.current.leftArrowKey.isPressed || Keyboard.current.aKey.isPressed) horizontalInput -= 1f;
+            if (Keyboard.current.rightArrowKey.isPressed || Keyboard.current.dKey.isPressed) horizontalInput += 1f;
             moveInput = new Vector2(horizontalInput, 0f);
         }
     }
 
-    private void Flip()
+    private void Flip(bool faceRight)
     {
-        facingRight = !facingRight;
+        if (IsOwner)
+        {
+            isFacingRight.Value = faceRight;
+        }
+    }
+
+    private void OnFacingDirectionChanged(bool previousValue, bool newValue)
+    {
+        ApplyVisualFlip(newValue);
+    }
+
+    private void ApplyVisualFlip(bool faceRight)
+    {
         Vector3 localScale = transform.localScale;
-        localScale.x *= -1f;
+        localScale.x = Mathf.Abs(localScale.x) * (faceRight ? 1f : -1f);
         transform.localScale = localScale;
     }
 

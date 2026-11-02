@@ -1,11 +1,11 @@
+using Unity.Netcode;
 using UnityEngine;
 using UnityEngine.InputSystem;
-using UnityEngine.InputSystem.Users;
 
 [RequireComponent(typeof(Rigidbody2D))]
 [RequireComponent(typeof(Animator))]
 [RequireComponent(typeof(PlayerInput))]
-public class MalakasPlayerMovement : MonoBehaviour
+public class MalakasPlayerMovement : NetworkBehaviour
 {
     [Header("Movement Settings")]
     [SerializeField] private float moveSpeed = 5f;
@@ -26,12 +26,18 @@ public class MalakasPlayerMovement : MonoBehaviour
     private Animator animator;
     private Vector2 moveInput;
     private bool isGrounded;
-    private bool facingRight = true;
     private bool isHoldingObject = false;
 
     private Transform grabbedObject;
     private Rigidbody2D grabbedBoxRb;
     private Transform nearbyPushable;
+
+    // Networked Facing Direction variable (Owner can write, everyone can read)
+    private NetworkVariable<bool> isFacingRight = new NetworkVariable<bool>(
+        true, 
+        NetworkVariableReadPermission.Everyone, 
+        NetworkVariableWritePermission.Owner
+    );
 
     private void Awake()
     {
@@ -39,8 +45,37 @@ public class MalakasPlayerMovement : MonoBehaviour
         animator = GetComponent<Animator>();
     }
 
+    public override void OnNetworkSpawn()
+    {
+        base.OnNetworkSpawn();
+        
+        PlayerInput playerInput = GetComponent<PlayerInput>();
+        if (playerInput != null)
+        {
+            playerInput.enabled = IsOwner;
+            if (IsOwner)
+            {
+                playerInput.ActivateInput();
+            }
+        }
+
+        // Listen for changes to facing direction across the network
+        isFacingRight.OnValueChanged += OnFacingDirectionChanged;
+        
+        // Apply initial visual state on spawn
+        ApplyVisualFlip(isFacingRight.Value);
+    }
+
+    public override void OnNetworkDespawn()
+    {
+        base.OnNetworkDespawn();
+        isFacingRight.OnValueChanged -= OnFacingDirectionChanged;
+    }
+
     private void Update()
     {
+        if (!IsOwner) return;
+
         if (groundCheck != null)
         {
             isGrounded = Physics2D.OverlapCircle(groundCheck.position, groundCheckRadius, groundLayer);
@@ -48,8 +83,8 @@ public class MalakasPlayerMovement : MonoBehaviour
 
         if (!isHoldingObject && moveInput.x != 0)
         {
-            if (moveInput.x > 0 && !facingRight) Flip();
-            else if (moveInput.x < 0 && facingRight) Flip();
+            if (moveInput.x > 0 && !isFacingRight.Value) Flip(true);
+            else if (moveInput.x < 0 && isFacingRight.Value) Flip(false);
         }
 
         float currentSpeed = Mathf.Abs(rb.linearVelocity.x);
@@ -60,24 +95,29 @@ public class MalakasPlayerMovement : MonoBehaviour
 
     private void FixedUpdate()
     {
+        if (!IsOwner) return;
+
         float currentSpeedMultiplier = isHoldingObject ? pushSpeedMultiplier : 1f;
         rb.linearVelocity = new Vector2(moveInput.x * moveSpeed * currentSpeedMultiplier, rb.linearVelocity.y);
 
         if (isHoldingObject && grabbedBoxRb != null)
         {
             float offset = 1.1f;
-            Vector2 targetPos = new Vector2(rb.position.x + (facingRight ? offset : -offset), grabbedBoxRb.position.y);
+            Vector2 targetPos = new Vector2(rb.position.x + (isFacingRight.Value ? offset : -offset), grabbedBoxRb.position.y);
             grabbedBoxRb.MovePosition(targetPos);
         }
     }
 
     public void OnMove(InputValue value)
     {
+        if (!IsOwner) return;
         moveInput = value.Get<Vector2>();
     }
 
     public void OnJump(InputValue value)
     {
+        if (!IsOwner) return;
+
         if (value.isPressed && isGrounded && !isHoldingObject)
         {
             rb.linearVelocity = new Vector2(rb.linearVelocity.x, jumpForce);
@@ -86,6 +126,8 @@ public class MalakasPlayerMovement : MonoBehaviour
 
     public void OnInteract(InputValue value)
     {
+        if (!IsOwner) return;
+
         if (!isHoldingObject)
         {
             if (nearbyPushable != null)
@@ -101,11 +143,11 @@ public class MalakasPlayerMovement : MonoBehaviour
 
                 if (transform.position.x > grabbedObject.position.x)
                 {
-                    if (facingRight) Flip();
+                    if (isFacingRight.Value) Flip(false);
                 }
                 else
                 {
-                    if (!facingRight) Flip();
+                    if (!isFacingRight.Value) Flip(true);
                 }
             }
         }
@@ -125,20 +167,30 @@ public class MalakasPlayerMovement : MonoBehaviour
 
     public void OnPunch(InputValue value)
     {
-        if (!value.isPressed || isHoldingObject) return;
+        if (!IsOwner || !value.isPressed || isHoldingObject) return;
+        PunchServerRpc();
+    }
 
-        animator.SetTrigger("Punch");
+    [ServerRpc]
+    private void PunchServerRpc()
+    {
+        TriggerPunchClientRpc();
 
-        // Calculate punch box position based on facing direction
-        Vector2 directionOffset = new Vector2(facingRight ? punchOffset.x : -punchOffset.x, punchOffset.y);
+        bool currentFacing = isFacingRight.Value;
+        Vector2 directionOffset = new Vector2(currentFacing ? punchOffset.x : -punchOffset.x, punchOffset.y);
         Vector2 punchPos = (Vector2)transform.position + directionOffset;
 
-        // Detect and destroy any destroyable objects in the hitbox
         Collider2D[] hitObjects = Physics2D.OverlapBoxAll(punchPos, punchSize, 0f, destroyableLayer);
         foreach (Collider2D hit in hitObjects)
         {
             Destroy(hit.transform.root.gameObject);
         }
+    }
+
+    [ClientRpc]
+    private void TriggerPunchClientRpc()
+    {
+        animator.SetTrigger("Punch");
     }
 
     private void OnTriggerEnter2D(Collider2D other)
@@ -155,11 +207,23 @@ public class MalakasPlayerMovement : MonoBehaviour
         if (rootTransform == nearbyPushable) nearbyPushable = null;
     }
 
-    private void Flip()
+    private void Flip(bool faceRight)
     {
-        facingRight = !facingRight;
+        if (IsOwner)
+        {
+            isFacingRight.Value = faceRight;
+        }
+    }
+
+    private void OnFacingDirectionChanged(bool previousValue, bool newValue)
+    {
+        ApplyVisualFlip(newValue);
+    }
+
+    private void ApplyVisualFlip(bool faceRight)
+    {
         Vector3 localScale = transform.localScale;
-        localScale.x *= -1f;
+        localScale.x = Mathf.Abs(localScale.x) * (faceRight ? 1f : -1f);
         transform.localScale = localScale;
     }
 
@@ -170,10 +234,5 @@ public class MalakasPlayerMovement : MonoBehaviour
             Gizmos.color = Color.green;
             Gizmos.DrawWireSphere(groundCheck.position, groundCheckRadius);
         }
-
-        // Visualize the punch hitbox in the Scene view when Malakas is selected
-        Gizmos.color = Color.red;
-        Vector2 drawOffset = new Vector2(facingRight ? punchOffset.x : -punchOffset.x, punchOffset.y);
-        Gizmos.DrawWireCube((Vector2)transform.position + drawOffset, punchSize);
     }
 }
